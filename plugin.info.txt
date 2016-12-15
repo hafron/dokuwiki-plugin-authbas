@@ -1,0 +1,7 @@
+base   authbas
+author Szymon Olewniczak
+email  (my first name) [at] imz [dot] re
+date   2016-12-18
+name   BAS Auth Plugin
+desc   Provides user authentication against BAS REST API.
+url    http://www.dokuwiki.org/plugin:authbas
