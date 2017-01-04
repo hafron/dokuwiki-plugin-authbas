@@ -4,44 +4,35 @@ if(!defined('DOKU_INC')) die();
 
 
 class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
-    /** @var array user cache */
-    protected $users = null;
+	
+	private $token='';
+	
+	private $bas_server = 'http://localhost/ghi/bas/';
+	
+	private function buildToken($user, $pass) {
+		return $user . ':' . $pass;
+	}
 
-    /** @var array filter pattern */
-    protected $_pattern = array();
-
-    /** @var bool safe version of preg_split */
-    protected $_pregsplit_safe = false;
-
-    /**
-     * Constructor
-     *
-     * Carry out sanity checks to ensure the object is
-     * able to operate. Set capabilities.
-     *
-     * @author  Christopher Smith <chris@jalakai.co.uk>
-     */
     public function __construct() {
         parent::__construct();
-        global $config_cascade;
-
-        if(!@is_readable($config_cascade['plainauth.users']['default'])) {
-            $this->success = false;
-        } else {
-            if(@is_writable($config_cascade['plainauth.users']['default'])) {
-                $this->cando['addUser']   = true;
-                $this->cando['delUser']   = true;
-                $this->cando['modLogin']  = true;
-                $this->cando['modPass']   = true;
-                $this->cando['modName']   = true;
-                $this->cando['modMail']   = true;
-                $this->cando['modGroups'] = true;
-            }
-            $this->cando['getUsers']     = true;
-            $this->cando['getUserCount'] = true;
-        }
-
-        $this->_pregsplit_safe = version_compare(PCRE_VERSION,'6.7','>=');
+        
+		$this->cando['addUser']   = true;
+		$this->cando['delUser']   = true;
+		$this->cando['modLogin']  = true;
+		$this->cando['modPass']   = true;
+		$this->cando['modName']   = true;
+		$this->cando['modMail']   = true;
+		$this->cando['modGroups'] = true;
+		$this->cando['getUsers']     = true;
+		$this->cando['getUserCount'] = true;
+		
+		$this->cando['logout'] = true;
+		
+		$this->success = true;
+		
+		if (isset($_SESSION[DOKU_COOKIE]['auth']['token'])) {
+			$this->token = $_SESSION[DOKU_COOKIE]['auth']['token'];
+		}
     }
 
     /**
@@ -50,16 +41,22 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * Checks if the given user exists and the given
      * plaintext password is correct
      *
-     * @author  Andreas Gohr <andi@splitbrain.org>
      * @param string $user
      * @param string $pass
      * @return  bool
      */
     public function checkPass($user, $pass) {
-        $userinfo = $this->getUserData($user);
-        if($userinfo === false) return false;
+		$this->user = $user;
+		$this->password_hash = $pass;
+		
+		$this->token = $this->buildToken($user, $pass);
+		$result = $this->getUserData($user);
 
-        return auth_verifyPassword($pass, $this->users[$user]['pass']);
+        if ($result !== false) {
+			$_SESSION[DOKU_COOKIE]['auth']['token'] = $this->token;
+			return true;
+		}
+		return false;
     }
 
     /**
@@ -72,38 +69,54 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * mail string  email addres of the user
      * grps array   list of groups the user is in
      *
-     * @author  Andreas Gohr <andi@splitbrain.org>
      * @param string $user
      * @param bool $requireGroups  (optional) ignored by this plugin, grps info always supplied
-     * @return array|false
+     * @return array('name' => String, 'mail' => String, 'grps' => Array)|false
      */
     public function getUserData($user, $requireGroups=true) {
-        if($this->users === null) $this->_loadUserData();
-        return isset($this->users[$user]) ? $this->users[$user] : false;
-    }
+		
+		$result = $this->_callAPI('GET', array('users', $user));
+		
+		if (isset($result['error'])) {
+			return false;
+		}
 
-    /**
-     * Creates a string suitable for saving as a line
-     * in the file database
-     * (delimiters escaped, etc.)
+		return $result;
+    }
+    
+	/**
+     * Return a count of the number of user which meet $filter criteria
      *
-     * @param string $user
-     * @param string $pass
-     * @param string $name
-     * @param string $mail
-     * @param array  $grps list of groups the user is in
-     * @return string
+     *
+     * @param array $filter
+     * @return int
      */
-    protected function _createUserLine($user, $pass, $name, $mail, $grps) {
-        $groups   = join(',', $grps);
-        $userline = array($user, $pass, $name, $mail, $groups);
-        $userline = str_replace('\\', '\\\\', $userline); // escape \ as \\
-        $userline = str_replace(':', '\\:', $userline); // escape : as \:
-        $userline = join(':', $userline)."\n";
-        return $userline;
+    public function getUserCount($filter = array()) {
+        $result = $this->_callAPI('GET', array('users'),
+									array_merge($filter, array('metaonly' => true)));
+						
+		
+		return $result['meta']['count'];
     }
-
-    /**
+    
+	/**
+     * Bulk retrieval of user data
+     *
+     *
+     * @param   int   $start index of first user to be returned
+     * @param   int   $limit max number of users to be returned
+     * @param   array $filter array of field/pattern pairs
+     * @return  array userinfo (refer getUserData for internal userinfo details)
+     */
+    public function retrieveUsers($start = 0, $limit = 0, $filter = array()) {
+		$result = $this->_callAPI('GET', array('users'),
+			array_merge($filter, array('start' => $start, 'limit' => $limit)));
+			
+		
+		return $result['data'];
+    }
+    
+	/**
      * Create a new User
      *
      * Returns false if the user already exists, null when an error
@@ -112,8 +125,6 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * The new user will be added to the default group by this
      * function if grps are not specified (default behaviour).
      *
-     * @author  Andreas Gohr <andi@splitbrain.org>
-     * @author  Chris Smith <chris@jalakai.co.uk>
      *
      * @param string $user
      * @param string $pwd
@@ -123,32 +134,28 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * @return bool|null|string
      */
     public function createUser($user, $pwd, $name, $mail, $grps = null) {
-        global $conf;
-        global $config_cascade;
-
-        // user mustn't already exist
-        if($this->getUserData($user) !== false) {
-            msg($this->getLang('userexists'), -1);
-            return false;
-        }
-
-        $pass = auth_cryptPassword($pwd);
+        //$pass = auth_cryptPassword($pwd);
+        $pass = $pwd;
 
         // set default group if no groups specified
         if(!is_array($grps)) $grps = array($conf['defaultgroup']);
 
-        // prepare user line
-        $userline = $this->_createUserLine($user, $pass, $name, $mail, $grps);
-
-        if(!io_saveFile($config_cascade['plainauth.users']['default'], $userline, true)) {
-            msg($this->getLang('writefail'), -1);
-            return null;
-        }
-
-        $this->users[$user] = compact('pass', 'name', 'mail', 'grps');
-        return $pwd;
+        $result = $this->_callAPI('POST', array('users'),
+						array('user' => $user,
+							  'password_hash' => $pass,
+							  'name' => $name,
+							  'mail' => $mail, 
+							  'grps' => $grps));
+		
+		//Integrity constraint violation: 19 column user is not unique
+		if (isset($result['error']) && $result['code'] === '23000') {
+			 msg($this->getLang('userexists'), -1);
+			 return false;
+		} else if (isset($result['success'])) {
+			return true;
+		}
     }
-
+    
     /**
      * Modify user data
      *
@@ -158,45 +165,31 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * @return  bool
      */
     public function modifyUser($user, $changes) {
-        global $ACT;
-        global $config_cascade;
+        if (!is_array($changes) || count($changes) === 0) {
+			return true;
+		}
 
-        // sanity checks, user must already exist and there must be something to change
-        if(($userinfo = $this->getUserData($user)) === false) {
-            msg($this->getLang('usernotexists'), -1);
-            return false;
-        }
+		
+		if (isset($changes['pass'])) {
+			//$changes['pass'] = auth_cryptPassword($changes['pass']);
+			$changes['pass'] = $changes['pass'];
+		}
+		
+		//it may change user name
+		$result = $this->_callAPI('PUT', array('users', $user), $changes);
+		
+		//Integrity constraint violation: 19 column user is not unique
+		if (isset($result['error']) && $result['code'] === '23000') {
+			 msg($this->getLang('userexists'), -1);
+			 return false;
+		} else if (isset($result['error']) && $result['error'] === 'update user: user protected') {
+			msg(sprintf($this->getLang('protected'), hsc($user)), -1);
+			return false;
+		} else if (isset($result['success'])) {
+			return true;
+		}
 
-        // don't modify protected users
-        if(!empty($userinfo['protected'])) {
-            msg(sprintf($this->getLang('protected'), hsc($user)), -1);
-            return false;
-        }
-
-        if(!is_array($changes) || !count($changes)) return true;
-
-        // update userinfo with new data, remembering to encrypt any password
-        $newuser = $user;
-        foreach($changes as $field => $value) {
-            if($field == 'user') {
-                $newuser = $value;
-                continue;
-            }
-            if($field == 'pass') $value = auth_cryptPassword($value);
-            $userinfo[$field] = $value;
-        }
-
-        $userline = $this->_createUserLine($newuser, $userinfo['pass'], $userinfo['name'], $userinfo['mail'], $userinfo['grps']);
-
-        if(!io_replaceInFile($config_cascade['plainauth.users']['default'], '/^'.$user.':/', $userline, true)) {
-            msg('There was an error modifying your user data. You may need to register again.', -1);
-            // FIXME, io functions should be fail-safe so existing data isn't lost
-            $ACT = 'register';
-            return false;
-        }
-
-        $this->users[$newuser] = $userinfo;
-        return true;
+        return false;
     }
 
     /**
@@ -207,230 +200,68 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      * @return  int             the number of users deleted
      */
     public function deleteUsers($users) {
-        global $config_cascade;
 
         if(!is_array($users) || empty($users)) return 0;
 
-        if($this->users === null) $this->_loadUserData();
-
         $deleted = array();
+
         foreach($users as $user) {
-            // don't delete protected users
-            if(!empty($this->users[$user]['protected'])) {
-                msg(sprintf($this->getLang('protected'), hsc($user)), -1);
-                continue;
-            }
             if(isset($this->users[$user])) $deleted[] = preg_quote($user, '/');
+
+			$result = $this->_callAPI('DELETE', array('users', $user));
+			if (isset($result['error'])
+				&& $result['error'] === 'delete user: user protected') {
+				msg(sprintf($this->getLang('protected'), hsc($user)), -1);
+			} else if (isset($result['success'])) {
+				$deleted[] = $user;
+			} else if (isset($result['error'])) {
+				msg($result['error'], -1);
+			}
         }
-
-        if(empty($deleted)) return 0;
-
-        $pattern = '/^('.join('|', $deleted).'):/';
-        if (!io_deleteFromFile($config_cascade['plainauth.users']['default'], $pattern, true)) {
-            msg($this->getLang('writefail'), -1);
-            return 0;
-        }
-
-        // reload the user list and count the difference
-        $count = count($this->users);
-        $this->_loadUserData();
-        $count -= count($this->users);
-        return $count;
+        
+        return count($deleted);
     }
+       
+    // Method: POST, PUT, GET etc
+	// Data: array("param" => "value") ==> index.php?param=value
+	protected function _callAPI($method, $url_data=array(), $user_data = array())
+	{
+		$curl = curl_init();
 
-    /**
-     * Return a count of the number of user which meet $filter criteria
-     *
-     * @author  Chris Smith <chris@jalakai.co.uk>
-     *
-     * @param array $filter
-     * @return int
-     */
-    public function getUserCount($filter = array()) {
+		$data = array_merge(array('token' => $this->token), $user_data);
 
-        if($this->users === null) $this->_loadUserData();
+		$url = $this->bas_server.implode('/', $url_data);
+		switch ($method) {
+		case "POST":
+			curl_setopt($curl, CURLOPT_POST, true);
+			curl_setopt($curl, CURLOPT_POSTFIELDS,  http_build_query($data, '', '&'));
+			break;
+		case "PUT":
+			//~ curl_setopt($curl, CURLOPT_PUT, true);
+			curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'PUT');
+			curl_setopt($curl, CURLOPT_POSTFIELDS,  http_build_query($data, '', '&'));
+			break;
+		case "GET":
+			$url = sprintf("%s?%s", $url, http_build_query($data, '', '&'));
+			break;
+		case "DELETE":
+			curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'DELETE');
+			$url = sprintf("%s?%s", $url, http_build_query($data, '', '&'));
+			break;
+		}
 
-        if(!count($filter)) return count($this->users);
+		curl_setopt($curl, CURLOPT_URL, $url);
+		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
 
-        $count = 0;
-        $this->_constructPattern($filter);
-
-        foreach($this->users as $user => $info) {
-            $count += $this->_filter($user, $info);
-        }
-
-        return $count;
-    }
-
-    /**
-     * Bulk retrieval of user data
-     *
-     * @author  Chris Smith <chris@jalakai.co.uk>
-     *
-     * @param   int   $start index of first user to be returned
-     * @param   int   $limit max number of users to be returned
-     * @param   array $filter array of field/pattern pairs
-     * @return  array userinfo (refer getUserData for internal userinfo details)
-     */
-    public function retrieveUsers($start = 0, $limit = 0, $filter = array()) {
-
-        if($this->users === null) $this->_loadUserData();
-
-        ksort($this->users);
-
-        $i     = 0;
-        $count = 0;
-        $out   = array();
-        $this->_constructPattern($filter);
-
-        foreach($this->users as $user => $info) {
-            if($this->_filter($user, $info)) {
-                if($i >= $start) {
-                    $out[$user] = $info;
-                    $count++;
-                    if(($limit > 0) && ($count >= $limit)) break;
-                }
-                $i++;
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * Only valid pageid's (no namespaces) for usernames
-     *
-     * @param string $user
-     * @return string
-     */
-    public function cleanUser($user) {
-        global $conf;
-        return cleanID(str_replace(':', $conf['sepchar'], $user));
-    }
-
-    /**
-     * Only valid pageid's (no namespaces) for groupnames
-     *
-     * @param string $group
-     * @return string
-     */
-    public function cleanGroup($group) {
-        global $conf;
-        return cleanID(str_replace(':', $conf['sepchar'], $group));
-    }
-
-    /**
-     * Load all user data
-     *
-     * loads the user file into a datastructure
-     *
-     * @author  Andreas Gohr <andi@splitbrain.org>
-     */
-    protected function _loadUserData() {
-        global $config_cascade;
-
-        $this->users = $this->_readUserFile($config_cascade['plainauth.users']['default']);
-
-        // support protected users
-        if(!empty($config_cascade['plainauth.users']['protected'])) {
-            $protected = $this->_readUserFile($config_cascade['plainauth.users']['protected']);
-            foreach(array_keys($protected) as $key) {
-                $protected[$key]['protected'] = true;
-            }
-            $this->users = array_merge($this->users, $protected);
-        }
-    }
-
-    /**
-     * Read user data from given file
-     *
-     * ignores non existing files
-     *
-     * @param string $file the file to load data from
-     * @return array
-     */
-    protected function _readUserFile($file) {
-        $users = array();
-        if(!file_exists($file)) return $users;
-
-        $lines = file($file);
-        foreach($lines as $line) {
-            $line = preg_replace('/#.*$/', '', $line); //ignore comments
-            $line = trim($line);
-            if(empty($line)) continue;
-
-            $row = $this->_splitUserData($line);
-            $row = str_replace('\\:', ':', $row);
-            $row = str_replace('\\\\', '\\', $row);
-
-            $groups = array_values(array_filter(explode(",", $row[4])));
-
-            $users[$row[0]]['pass'] = $row[1];
-            $users[$row[0]]['name'] = urldecode($row[2]);
-            $users[$row[0]]['mail'] = $row[3];
-            $users[$row[0]]['grps'] = $groups;
-        }
-        return $users;
-    }
-
-    protected function _splitUserData($line){
-        // due to a bug in PCRE 6.6, preg_split will fail with the regex we use here
-        // refer github issues 877 & 885
-        if ($this->_pregsplit_safe){
-            return preg_split('/(?<![^\\\\]\\\\)\:/', $line, 5);       // allow for : escaped as \:
-        }
-
-        $row = array();
-        $piece = '';
-        $len = strlen($line);
-        for($i=0; $i<$len; $i++){
-            if ($line[$i]=='\\'){
-                $piece .= $line[$i];
-                $i++;
-                if ($i>=$len) break;
-            } else if ($line[$i]==':'){
-                $row[] = $piece;
-                $piece = '';
-                continue;
-            }
-            $piece .= $line[$i];
-        }
-        $row[] = $piece;
-
-        return $row;
-    }
-
-    /**
-     * return true if $user + $info match $filter criteria, false otherwise
-     *
-     * @author   Chris Smith <chris@jalakai.co.uk>
-     *
-     * @param string $user User login
-     * @param array  $info User's userinfo array
-     * @return bool
-     */
-    protected function _filter($user, $info) {
-        foreach($this->_pattern as $item => $pattern) {
-            if($item == 'user') {
-                if(!preg_match($pattern, $user)) return false;
-            } else if($item == 'grps') {
-                if(!count(preg_grep($pattern, $info['grps']))) return false;
-            } else {
-                if(!preg_match($pattern, $info[$item])) return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * construct a filter pattern
-     *
-     * @param array $filter
-     */
-    protected function _constructPattern($filter) {
-        $this->_pattern = array();
-        foreach($filter as $item => $pattern) {
-            $this->_pattern[$item] = '/'.str_replace('/', '\/', $pattern).'/i'; // allow regex characters
-        }
-    }
+		$result = curl_exec($curl);
+		curl_close($curl);
+		
+		$pres = json_decode($result, true);
+		
+		if ($pres === NULL) {
+			throw new Exception('Invalid json: '.$result);
+		}
+		
+		return $pres;
+	}
 }
