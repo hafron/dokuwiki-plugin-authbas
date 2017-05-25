@@ -47,7 +47,7 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
      */
     public function checkPass($user, $pass) {
 		$this->user = $user;
-		$this->password_hash = $pass;
+		$this->pass = $pass;
 		
 		$this->token = $this->buildToken($user, $pass);
 		$result = $this->getUserData($user);
@@ -142,7 +142,7 @@ class auth_plugin_authbas extends DokuWiki_Auth_Plugin {
 
         $result = $this->_callAPI('POST', array('users'),
 						array('user' => $user,
-							  'password_hash' => $pass,
+							  'pass' => $pass,
 							  'name' => $name,
 							  'mail' => $mail, 
 							  'grps' => $grps));
